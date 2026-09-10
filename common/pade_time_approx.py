@@ -1,6 +1,11 @@
 import sympy as sp
 from typing import Callable
 
+# t^(m+1)/(m+1)! gate for the Padé+PINN ansatz R + phi(t)*NN: zero at t=0 so the IC is exact; the first m time derivatives of the ansatz come from the Padé alone
+def make_time_gate(t_sym: sp.Symbol, m: int = 0) -> Callable:
+    expr = t_sym ** (m + 1) / sp.factorial(m + 1)
+    return sp.lambdify(t_sym, expr, modules="jax")
+
 def _taylor_time_coeffs(u0_expr: sp.Expr, t_sym: sp.Symbol, pde_op: Callable[[sp.Expr], sp.Expr], order: int = 3, normalize: Callable[[sp.Expr], sp.Expr] | None = None) -> list[sp.Expr]:
     # normalize defaults to sp.simplify (readable output); pass sp.expand for PDEs with trig/exp coefficients, where simplify's identity-search is combinatorially slow but coeff() only needs expanded (not simplified) form
     # _norm = normalize if normalize is not None else sp.simplify

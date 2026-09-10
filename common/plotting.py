@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -318,3 +319,21 @@ def plot_error_evolution(t_eval, errs_pade, errs_nn, params, name, folder):
     plt.savefig(os.path.join(save_dir, f"{name}_error.pdf"), dpi=600, bbox_inches='tight', pad_inches=0.02)
     plt.savefig(os.path.join(save_dir, f"{name}_error.png"), dpi=600, bbox_inches='tight', pad_inches=0.02)
     plt.close()
+
+
+"""Held-out kappa where Padé+PINN reached its lowest Rel_MSE, read back from its saved metrics so the plain PINN plots the exact same kappa.
+   Same rule as train_pade_pinn (strict <, first minimum wins, NaN never picked). Needs train_pade_pinn to have finished first with the same
+   held-out kappas; call it before training so a missing or mismatched file fails immediately instead of after the whole run."""
+def best_pade_pinn_kappa(metrics_path, test_kappas):
+    if not os.path.exists(metrics_path):
+        raise FileNotFoundError(f"{metrics_path} not found -- run train_pade_pinn first; the PINN plots at Padé+PINN's best kappa")
+    with open(metrics_path) as f:
+        metrics = json.load(f)
+    best_key, best_mse = next(iter(metrics)), float("inf")
+    for key, entry in metrics.items():
+        if entry["Rel_MSE"][1] < best_mse:
+            best_key, best_mse = key, entry["Rel_MSE"][1]
+    match = np.flatnonzero(np.isclose(test_kappas, float(best_key), rtol=0.0, atol=1e-12))
+    if match.size == 0:
+        raise ValueError(f"best kappa {best_key} in {metrics_path} is not one of this run's held-out kappas -- those Padé+PINN metrics came from a different config")
+    return float(test_kappas[match[0]])

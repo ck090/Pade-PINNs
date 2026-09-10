@@ -16,9 +16,9 @@ from jax.example_libraries import optimizers
 from common.env import configure_jax
 from common.nn import Params, init_params, mlp_forward
 from common.sampling import sample_log_kappa, sample_residual_and_bc, select_rar_points
-from common.plotting import plot_prediction, animate_prediction, plot_loss_history, plot_pinn_error_evolution, best_pade_pinn_kappa
-from pdes.schrodinger.config import SchrodingerConfig, make_test_kappas
-from pdes.schrodinger.physics import uv_initial_condition_mode, solve_schrodinger_ref
+from common.plotting import plot_prediction, plot_pinn_error_evolution, best_pade_pinn_kappa
+from pdes.fokkerplanck.config import FokkerPlanckConfig, make_test_kappas
+from pdes.fokkerplanck.physics import THETA, X0_INIT, S0_INIT, initial_density, fokker_planck_exact
 
 configure_jax(enable_x64=True)
 
@@ -27,33 +27,24 @@ def prepare_data(nx: int, nbc: int, nic: int, duration: float, min_x: float, max
     X_res, X_bc_left, X_bc_right = sample_residual_and_bc(nx, nbc, duration, min_x, max_x, starting_point)
     x_ic = np.random.uniform(min_x, max_x, size=nic)
     X_ic = jnp.array([[x, starting_point] for x in x_ic])
-    u0_vals, v0_vals = uv_initial_condition_mode(x_ic)
-    UV_ic = jnp.array(np.stack([u0_vals, v0_vals], axis=1))
-    return X_res, X_bc_left, X_bc_right, X_ic, UV_ic
+    P_ic = jnp.array(initial_density(x_ic))
+    return X_res, X_bc_left, X_bc_right, X_ic, P_ic
 
-"""Nonlinear Schrodinger PDE: i*w_t + kappa*w_xx + |w|^2*w = 0 for w = u + iv, split into real/imaginary components: u_t + kappa*v_xx + (u^2+v^2)*v = 0, v_t - kappa*u_xx - (u^2+v^2)*u = 0"""
+"""Fokker-Planck PDE: p_t - THETA*(p + x*p_x) - (kappa^2/2)*p_xx = 0; network input X is (N, 3) = [x, t, kappa], derivatives w.r.t. indices 0 (x) and 1 (t)"""
 @jax.jit
-def schrodinger_eqn(params: Params, X: jnp.ndarray, kappa: float) -> jnp.ndarray:
+def fokker_planck_eqn(params: Params, X: jnp.ndarray, kappa: float) -> jnp.ndarray:
     pinn = partial(mlp_forward, params)
-    def u_single_real(xt: jnp.ndarray) -> jnp.ndarray:
-        return pinn(xt.reshape(1, -1))[:, 0].squeeze()
-    def u_single_imag(xt: jnp.ndarray) -> jnp.ndarray:
-        return pinn(xt.reshape(1, -1))[:, 1].squeeze()
+    def p_fn(xt: jnp.ndarray) -> jnp.ndarray:
+        return pinn(xt.reshape(1, -1)).squeeze()
 
     def compute_pde(xt: jnp.ndarray) -> jnp.ndarray:
-        u = u_single_real(xt)
-        v = u_single_imag(xt)
-        u_t = jax.grad(u_single_real)(xt)[1]
-        v_t = jax.grad(u_single_imag)(xt)[1]
-        u_xx = jax.hessian(u_single_real)(xt)[0, 0]
-        v_xx = jax.hessian(u_single_imag)(xt)[0, 0]
-        h2 = u ** 2 + v ** 2
-        pde_real = u_t + kappa * v_xx + h2 * v
-        pde_imag = v_t - kappa * u_xx - h2 * u
-        return jnp.array([pde_real, pde_imag])
+        dp = jax.grad(p_fn)(xt)
+        p_xx = jax.hessian(p_fn)(xt)[0, 0]
+        # d/dx(x*p) = p + x*p_x, so the drift term needs the value as well as the x-derivative
+        return dp[1] - THETA * (p_fn(xt) + xt[0] * dp[0]) - 0.5 * kappa ** 2 * p_xx
     return jax.vmap(compute_pde)(X)
 
-"""PINN: single global network conditioned on physics parameter kappa; 2-component output (u, v)"""
+"""PINN: single global network conditioned on physics parameter kappa; 1-component output (p)"""
 class PINN:
     def __init__(self, layer: List[int], lr: float) -> None:
         self.params = init_params(layer, zero_last_layer=True)
@@ -67,15 +58,15 @@ class PINN:
         return mlp_forward(params, X)
 
     @partial(jax.jit, static_argnums=(0,))
-    def update(self, epoch: int, opt_state: Any, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float) -> Tuple[Any, Tuple[float, float, float]]:
+    def update(self, epoch: int, opt_state: Any, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, P_ic: jnp.ndarray, kappa: float) -> Tuple[Any, Tuple[float, float, float]]:
         params = self.get_params(opt_state)
-        grads = jax.grad(self.loss)(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa)
+        grads = jax.grad(self.loss)(params, X_res, X_bc_left, X_bc_right, X_ic, P_ic, kappa)
         next_opt_state = self.opt_update(epoch, grads, opt_state)
-        loss_res, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa)
+        loss_res, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, P_ic, kappa)
         return next_opt_state, (loss_res, loss_bc, loss_ic)
 
     @partial(jax.jit, static_argnums=(0,))
-    def loss_component(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float) -> Tuple[float, float, float]:
+    def loss_component(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, P_ic: jnp.ndarray, kappa: float) -> Tuple[float, float, float]:
         N_res = X_res.shape[0]
         N_bc = X_bc_left.shape[0]
         N_ic = X_ic.shape[0]
@@ -86,39 +77,26 @@ class PINN:
         X_bcr_full = _append(X_bc_right, N_bc)
         X_ic_full = _append(X_ic, N_ic)
         # PDE residual
-        eq = schrodinger_eqn(params, X_res_full, kappa)
+        eq = fokker_planck_eqn(params, X_res_full, kappa)
         loss_residual = jnp.mean(eq ** 2)
-        # Periodic BC: u(left)=u(right), v(left)=v(right) and derivatives
-        out_bcl = self.forward(params, X_bcl_full)
-        out_bcr = self.forward(params, X_bcr_full)
-        ul_pred, vl_pred = out_bcl[:, 0], out_bcl[:, 1]
-        ur_pred, vr_pred = out_bcr[:, 0], out_bcr[:, 1]
-        loss_boundary = jnp.mean((ul_pred - ur_pred) ** 2 + (vl_pred - vr_pred) ** 2)
-        def u_real_fn(xt: jnp.ndarray) -> jnp.ndarray:
-            return self.forward(params, xt.reshape(1, -1))[:, 0].squeeze()
-        def u_imag_fn(xt: jnp.ndarray) -> jnp.ndarray:
-            return self.forward(params, xt.reshape(1, -1))[:, 1].squeeze()
-        grad_u = jax.grad(u_real_fn)
-        grad_v = jax.grad(u_imag_fn)
-        u_x_left = jax.vmap(lambda xt: grad_u(xt)[0])(X_bcl_full)
-        u_x_right = jax.vmap(lambda xt: grad_u(xt)[0])(X_bcr_full)
-        v_x_left = jax.vmap(lambda xt: grad_v(xt)[0])(X_bcl_full)
-        v_x_right = jax.vmap(lambda xt: grad_v(xt)[0])(X_bcr_full)
-        loss_boundary += jnp.mean((u_x_left - u_x_right) ** 2 + (v_x_left - v_x_right) ** 2)
+        # Dirichlet BC: the density vanishes at both ends of the domain
+        out_left = self.forward(params, X_bcl_full)
+        out_right = self.forward(params, X_bcr_full)
+        loss_boundary = jnp.mean(out_left ** 2) + jnp.mean(out_right ** 2)
         # Initial condition
-        out_ic = self.forward(params, X_ic_full)
-        loss_ic = jnp.mean((out_ic - UV_ic) ** 2)
+        out_ic = self.forward(params, X_ic_full).squeeze()
+        loss_ic = jnp.mean((out_ic - P_ic) ** 2)
         return loss_residual, loss_boundary, loss_ic
 
     @partial(jax.jit, static_argnums=(0,))
-    def loss(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float) -> float:
-        loss_residual, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa)
+    def loss(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, P_ic: jnp.ndarray, kappa: float) -> float:
+        loss_residual, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, P_ic, kappa)
         return loss_residual + loss_bc + loss_ic
 
     def save_model(self, filepath: str) -> None:
-            with open(filepath, 'wb') as f:
-                pickle.dump({'params': self.params, 'layer': self.layer, 'lr': self.lr}, f)
-            print(f"Model saved to {filepath}")
+        with open(filepath, 'wb') as f:
+            pickle.dump({'params': self.params, 'layer': self.layer, 'lr': self.lr}, f)
+        print(f"Model saved to {filepath}")
 
     @staticmethod
     def load_model(filepath: str) -> 'PINN':
@@ -129,29 +107,35 @@ class PINN:
         print(f"Model loaded from {filepath}")
         return model
 
-"""Evaluate the PINN against the reference solver for one kappa, over the full (x,t) eval grid"""
+"""Evaluate the PINN against the exact OU density for one kappa, over the full (x,t) eval grid"""
 def evaluate_kappa(model: PINN, kappa_test: float, x_plot: np.ndarray, t_plot: np.ndarray, XT_flat: np.ndarray) -> Dict[str, Any]:
     nx_eval, nt_eval = len(x_plot), len(t_plot)
     XT_full = jnp.array(np.column_stack([XT_flat, np.full(XT_flat.shape[0], kappa_test)]))
-    UV_pred = np.array(model.forward(model.params, XT_full)).reshape(nt_eval, nx_eval, 2)
-    H_pred = UV_pred[:, :, 0] ** 2 + UV_pred[:, :, 1] ** 2
+    U_pred = np.array(model.forward(model.params, XT_full)).reshape(nt_eval, nx_eval)
 
-    u0, v0 = uv_initial_condition_mode(x_plot)
-    U_true, V_true = solve_schrodinger_ref(x_plot, t_plot, kappa_test, u0, v0)
-    H_true = U_true ** 2 + V_true ** 2
+    X_grid, T_grid = np.meshgrid(x_plot, t_plot)
+    U_true = fokker_planck_exact(X_grid, T_grid, kappa_test)
 
-    errors = [np.linalg.norm(H_pred[i] - H_true[i]) / max(np.linalg.norm(H_true[i]), 1e-10) for i in range(nt_eval)]
-    norm_g = max(float(np.mean(H_true ** 2)), 1e-10)
-    mse = float(np.mean((H_pred - H_true) ** 2) / norm_g)
-    return {"H_pred": H_pred, "H_true": H_true, "errors": errors, "avg": float(np.mean(errors)), "mse": mse}
+    errors = [np.linalg.norm(U_pred[i] - U_true[i]) / max(np.linalg.norm(U_true[i]), 1e-10) for i in range(nt_eval)]
+    norm_g = max(float(np.mean(U_true ** 2)), 1e-10)
+    mse = float(np.mean((U_pred - U_true) ** 2) / norm_g)
+
+    # Same Fokker-Planck diagnostics the Padé+PINN reports: an unconstrained network conserves neither mass nor positivity either
+    mass = np.trapezoid(U_pred, x_plot, axis=1)
+
+    return {
+        "U_pred": U_pred, "U_true": U_true, "errors": errors,
+        "avg": float(np.mean(errors)), "mse": mse,
+        "mass_err": float(np.max(np.abs(mass - 1.0))), "min_p": float(U_pred.min()),
+    }
 
 """Main"""
 if __name__ == "__main__":
-    cfg = SchrodingerConfig()
+    cfg = FokkerPlanckConfig()
     np.random.seed(cfg.seed)
     test_kappas = make_test_kappas(cfg)
     # Plot the held-out kappa where Padé+PINN did best so the two models' figures are directly comparable
-    plot_kappa = best_pade_pinn_kappa("models/pade_pinn_schrodinger_error_metrics.json", test_kappas)
+    plot_kappa = best_pade_pinn_kappa("models/pade_pinn_fokkerplanck_error_metrics.json", test_kappas)
 
     duration, nx, nbc, nic, nx_eval = cfg.duration, cfg.nx, cfg.nbc, cfg.nic, cfg.nx_eval
     min_x, max_x, starting_point = cfg.min_x, cfg.max_x, cfg.starting_point
@@ -164,26 +148,28 @@ if __name__ == "__main__":
     X_res_anchor = None
 
     print(f"\n{'='*62}")
-    print(f"  PINN training  -  single global network  (Schrodinger equation)")
+    print(f"  PINN training  -  single global network  (Fokker-Planck)")
     print(f"  Epochs={epochs}  lr={lr}")
-    print(fr"  kappa in [{param_lb, param_ub}]  log-uniform   plot kappa={plot_kappa:.5f} (Padé+PINN best)")
+    print(f"  time={duration}  nx={nx}  min_x={min_x} max_x={max_x}")
+    print(f"  theta={THETA}  x0={X0_INIT}  s0={S0_INIT}")
+    print(f"  kappa in [{param_lb}, {param_ub}]  log-uniform   plot kappa={plot_kappa:.5f} (Padé+PINN best)")
     print(f"{'='*62}")
 
     for epoch in range(1, epochs + 1):
-        X_res, X_bc_left, X_bc_right, X_ic, UV_ic = prepare_data(nx, nbc, nic, duration, min_x, max_x, starting_point)
+        X_res, X_bc_left, X_bc_right, X_ic, P_ic = prepare_data(nx, nbc, nic, duration, min_x, max_x, starting_point)
         kappa = float(sample_log_kappa(param_lb, param_ub))
         kappa_j = jnp.asarray(kappa)
 
         if epoch % RAR_EVERY == 0 and epoch < epochs:
             def residual_fn(X: jnp.ndarray) -> jnp.ndarray:
                 kappa_col = jnp.full((X.shape[0], 1), kappa_j)
-                return schrodinger_eqn(model.params, jnp.concatenate([X, kappa_col], axis=1), kappa_j)
+                return fokker_planck_eqn(model.params, jnp.concatenate([X, kappa_col], axis=1), kappa_j)
             X_res_anchor = select_rar_points(residual_fn, RAR_POOL, RAR_N_ANCHOR, duration, min_x, max_x, starting_point)
         if X_res_anchor is not None:
             X_res = jnp.concatenate([X_res, X_res_anchor], axis=0)
 
         start = time.time()
-        model.opt_state, losses = model.update(epoch, model.opt_state, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa_j)
+        model.opt_state, losses = model.update(epoch, model.opt_state, X_res, X_bc_left, X_bc_right, X_ic, P_ic, kappa_j)
         model.params = model.get_params(model.opt_state)
         end = time.time()
 
@@ -192,14 +178,15 @@ if __name__ == "__main__":
             print(f"  {epoch:5d}/{epochs}  [{float(loss_res):.3e}, {float(loss_bc):.3e}, {float(loss_ic):.3e}]  kappa={kappa:.5f}  {end-start:.2f}s")
 
     os.makedirs("models", exist_ok=True)
-    model.save_model("models/pinn_schrodinger.pkl")
+    model.save_model("models/pinn_fokkerplanck.pkl")
 
     print("\n" + "=" * 65)
     print(f"Evaluation — {len(test_kappas)} held-out κ values")
     print("=" * 65)
     error_metric = {}
 
-    x_plot = np.linspace(min_x, max_x, nx_eval, endpoint=False)
+    # Dirichlet (non-periodic) domain, so both endpoints are part of the evaluation grid
+    x_plot = np.linspace(min_x, max_x, nx_eval)
     t_plot = np.linspace(starting_point, duration, nx_eval)
     X_plot, T_plot = np.meshgrid(x_plot, t_plot)
     XT_flat = np.column_stack([X_plot.ravel(), T_plot.ravel()])
@@ -217,15 +204,19 @@ if __name__ == "__main__":
         print(f"{'L2':<12} {avg_err:>12.3e}")
         print(f"{'Rel_MSE':<12} {mse:>12.3e}")
         print(f"{'Rel_RMSE':<12} {np.sqrt(mse):>12.3e}")
+        print(f"{'Mass err':<12} {result['mass_err']:>12.3e}")
+        print(f"{'Min p':<12} {result['min_p']:>12.3e}")
         print(f"{'='*62}")
 
         error_metric[kappa_test] = {
             'L2': avg_err,
             'Rel_MSE': mse,
             'Rel_RMSE': float(np.sqrt(mse)),
+            'Mass_err': result['mass_err'],
+            'Min_p': result['min_p'],
         }
 
-    json_path = "models/pinn_schrodinger_error_metrics.json"
+    json_path = "models/pinn_fokkerplanck_error_metrics.json"
     with open(json_path, 'w') as f:
         json.dump(error_metric, f, indent=4)
     print(f"\nError metrics saved to {json_path}")
@@ -236,20 +227,13 @@ if __name__ == "__main__":
     # Real boundary samples (same distribution/code path used during training)
     _, X_bc_left, X_bc_right, _, _ = prepare_data(1, cfg.nbc_plot, 1, duration, min_x, max_x, starting_point)
 
-    x_plot_closed = np.append(x_plot, max_x)
-    X_plot_closed, T_plot_closed = np.meshgrid(x_plot_closed, t_plot)
-    XT_flat_closed = jnp.array(np.column_stack([X_plot_closed.ravel(), T_plot_closed.ravel(), np.full(X_plot_closed.size, plot_kappa)]))
-    UV_pred_closed = np.array(model.forward(model.params, XT_flat_closed)).reshape(nx_eval, nx_eval + 1, 2)
-    H_pred_closed = UV_pred_closed[:, :, 0] ** 2 + UV_pred_closed[:, :, 1] ** 2
-    H_true_closed = np.concatenate([plot_result["H_true"], plot_result["H_true"][:, :1]], axis=1)
-
-    plot_pinn_error_evolution(t_plot, plot_result["errors"], {'\\kappa': plot_kappa}, name="schrodingerPINN", folder="pinn")
-    plot_prediction(T_plot_closed, X_plot_closed, H_pred_closed, H_true_closed, X_bc_left, X_bc_right, {'\\kappa': plot_kappa}, intervals=[0.02, duration / 2, duration - 0.01], name="schrodingerPINN", folder="pinn")
-    animate_prediction(T_plot_closed, X_plot_closed, H_pred_closed, H_true_closed, {'\\kappa': plot_kappa}, name="schrodingerPINN", folder="pinn")
+    plot_pinn_error_evolution(t_plot, plot_result["errors"], {'\\kappa': plot_kappa}, name="fokkerplanckPINN", folder="pinn")
+    plot_prediction(T_plot, X_plot, plot_result["U_pred"], plot_result["U_true"], X_bc_left, X_bc_right, {'\\kappa': plot_kappa}, intervals=[0.1, duration / 2, duration - 0.05], name="fokkerplanckPINN", folder="pinn")
 
     avg_L2 = float(np.mean([v['L2'] for v in error_metric.values()]))
     avg_mse = float(np.mean([v['Rel_MSE'] for v in error_metric.values()]))
     avg_rmse = float(np.mean([v['Rel_RMSE'] for v in error_metric.values()]))
+    avg_mass = float(np.mean([v['Mass_err'] for v in error_metric.values()]))
 
     print("\n" + "=" * 65)
     print(f"Final Average Error Metrics — across {len(error_metric)} held-out κ values")
@@ -259,4 +243,5 @@ if __name__ == "__main__":
     print(f"{'Avg L2':<12} {avg_L2:>12.3e}")
     print(f"{'Rel_MSE':<12} {avg_mse:>12.3e}")
     print(f"{'Rel_RMSE':<12} {avg_rmse:>12.3e}")
+    print(f"{'Mass err':<12} {avg_mass:>12.3e}")
     print("=" * 62)
