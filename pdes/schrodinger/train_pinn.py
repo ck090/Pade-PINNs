@@ -22,8 +22,7 @@ from pdes.schrodinger.physics import uv_initial_condition_mode, solve_schrodinge
 
 configure_jax(enable_x64=True)
 
-# Sample collocation, boundary, and initial-condition points; IC points/values are on top of the
-# shared residual+BC sampler since the plain PINN (unlike Padé+PINN) enforces the IC via a loss term.
+"""Sample collocation, boundary, and initial-condition points; IC points/values are on top of the shared residual+BC sampler since the plain PINN (unlike Padé+PINN) enforces the IC via a loss term"""
 def prepare_data(nx: int, nbc: int, nic: int, duration: float, min_x: float, max_x: float, starting_point: float) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     X_res, X_bc_left, X_bc_right = sample_residual_and_bc(nx, nbc, duration, min_x, max_x, starting_point)
     x_ic = np.random.uniform(min_x, max_x, size=nic)

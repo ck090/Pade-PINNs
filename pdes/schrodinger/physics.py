@@ -3,42 +3,24 @@ import numpy as np
 import sympy as sp
 from scipy.integrate import solve_ivp
 
-# Nonlinear Schrodinger equation: i*w_t + kappa*w_xx + |w|^2*w = 0 for w = u + iv,
-# split into real/imaginary components:
+# Nonlinear Schrodinger equation: i*w_t + kappa*w_xx + |w|^2*w = 0 for w = u + iv split into real/imaginary components:
 #   u_t + kappa*v_xx + (u^2+v^2)*v = 0
 #   v_t - kappa*u_xx - (u^2+v^2)*u = 0
-#
-# kappa scales the DISPERSION, not a potential. A potential term (-kappa*w) is a pure gauge:
-# w = exp(-i*kappa*t)*psi removes it exactly, leaving |w|^2 independent of kappa, so every metric
-# built on H = u^2+v^2 is blind to it. On the dispersion kappa sets the oscillation rate of mode k
-# (frequency ~ kappa*k^2) and is genuinely visible in H. The spatial rescaling xi = x/sqrt(kappa)
-# that would remove it is blocked by the fixed domain and fixed-wavenumber IC below.
-
-# Initial condition: a single Fourier eigenmode of L = kappa*d_xx on the periodic domain.
-# The eigenmode is load-bearing, not cosmetic. The time-Pade coefficients are formed pointwise as
-# ratios of the Taylor coefficients (b2 = L^4 u0 / (12 L^2 u0)); for an eigenfunction that collapses
-# to the positive constant lambda^2/12, so the denominator 1 + b2*t^2 can never vanish. For anything
-# that is NOT an eigenfunction -- sech, a gaussian, or even a sum of two modes -- the ratio varies
-# with x, changes sign at the nodes of L^2 u0, and plants real poles inside t in [0, 2] that blow the
-# Pade baseline up by ~10^4. Amplitude stays small because the |w|^2*w term the Pade omits scales as A^3.
-# DOMAIN_LENGTH must equal cfg.max_x - cfg.min_x, or the IC is not periodic on the solved domain.
-DOMAIN_LENGTH = 10.0
+DOMAIN_LENGTH = 15.0
 IC_MODE = 1
-IC_AMPLITUDE = 0.5
+IC_AMPLITUDE = 0.8
+IC_MULTIPLIER = 4.0
 
 def uv_initial_condition_mode(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    k = 2.0 * np.pi * IC_MODE / DOMAIN_LENGTH
+    k = IC_MULTIPLIER * np.pi * IC_MODE / DOMAIN_LENGTH
     return IC_AMPLITUDE * np.cos(k * x), np.zeros_like(x)
 
-# The linear part of the PDE above (drop the |w|^2*w nonlinearity): u_t = pde_op_u(v), v_t = pde_op_v(u).
-# This is what the Padé-in-time approximant is built from; the PINN correction is left to capture
-# the nonlinearity. x_sym/t_sym/kappa_sym are fresh symbols for each call.
 def symbolic_linearized_schrodinger() -> tuple[sp.Symbol, sp.Symbol, sp.Symbol, sp.Expr, sp.Expr, Callable, Callable]:
     x_sym = sp.Symbol("x", real=True)
     t_sym, kappa_sym = sp.symbols("t kappa", real=True, positive=True)
     # Same mode as uv_initial_condition_mode -- both derive from the constants above, since a Pade
     # built for a different IC than the reference solver is seeded with fails silently.
-    k_sym = 2 * sp.pi * IC_MODE / DOMAIN_LENGTH
+    k_sym = IC_MULTIPLIER * sp.pi * IC_MODE / DOMAIN_LENGTH
     u_initial, v_initial = IC_AMPLITUDE * sp.cos(k_sym * x_sym), sp.Integer(0)
     pde_op_u = lambda v: -kappa_sym * v.diff(x_sym, 2)
     pde_op_v = lambda u: kappa_sym * u.diff(x_sym, 2)

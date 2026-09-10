@@ -239,29 +239,6 @@ def compute_pade_time_21_pair(u0_expr: sp.Expr, v0_expr: sp.Expr, x_sym: sp.Symb
     print(f" P_v[2/1](x,t) = {P_v}")
     return P_u, P_v, taylor_u, taylor_v
 
-def _compute_pade_time_22_pair_polefree(u0_expr: sp.Expr, v0_expr: sp.Expr, x_sym: sp.Symbol, t_sym: sp.Symbol, pde_op_u: Callable[[sp.Expr], sp.Expr], pde_op_v: Callable[[sp.Expr], sp.Expr], normalize: Callable[[sp.Expr], sp.Expr] | None = None) -> tuple[sp.Expr, sp.Expr, list[sp.Expr], list[sp.Expr]]:
-    taylor_u, taylor_v = _taylor_time_coeffs_coupled(u0_expr, v0_expr, t_sym, pde_op_u, pde_op_v, order=3, normalize=normalize)
-    f0_u, f1_u, f2_u, f3_u = taylor_u
-    f0_v, f1_v, f2_v, f3_v = taylor_v
-
-    _fast = normalize if normalize is not None else (lambda expr: sp.cancel(sp.expand(expr)))
-    if _fast(f2_u) != 0:
-        b1 = _fast(-(f3_u / (3 * f2_u)))
-    elif _fast(f2_v) != 0:
-        b1 = _fast(-(f3_v / (3 * f2_v)))
-    else:
-        raise ValueError("compute_pade_time_22_pair(pole_free=True): f2_u and f2_v both vanish identically, b1 is undetermined")
-    b2 = b1 ** 2
-    print(f" b0 = 1  (normalised)\n b1 (shared) = {b1}\n b2 (shared) = b1**2")
-
-    def numer(f0: sp.Expr, f1: sp.Expr, f2: sp.Expr) -> sp.Expr:
-        return _fast(f0) + _fast(f1 + b1 * f0) * t_sym + _fast(f2 / 2 + b1 * f1 + b2 * f0) * t_sym ** 2
-
-    denom = 1 + b1 * t_sym + b2 * t_sym ** 2
-    P_u, P_v = numer(f0_u, f1_u, f2_u) / denom, numer(f0_v, f1_v, f2_v) / denom
-    print(f" P_u[2/2] pole-free built ({sp.count_ops(P_u)} ops)\n P_v[2/2] pole-free built ({sp.count_ops(P_v)} ops)")
-    return P_u, P_v, taylor_u, taylor_v
-
 # [2/2] Padé for a linearly-coupled pair u_t = pde_op_u(v), v_t = pde_op_v(u)
 def compute_pade_time_22_pair(u0_expr: sp.Expr, v0_expr: sp.Expr, x_sym: sp.Symbol, t_sym: sp.Symbol, pde_op_u: Callable[[sp.Expr], sp.Expr], pde_op_v: Callable[[sp.Expr], sp.Expr]) -> tuple[sp.Expr, sp.Expr, list[sp.Expr], list[sp.Expr]]:
     taylor_u, taylor_v = _taylor_time_coeffs_coupled(u0_expr, v0_expr, t_sym, pde_op_u, pde_op_v, order=4)
@@ -272,18 +249,6 @@ def compute_pade_time_22_pair(u0_expr: sp.Expr, v0_expr: sp.Expr, x_sym: sp.Symb
     print(f" f2_u = {f2_u}   f2_v = {f2_v}")
     print(f" f3_u = {f3_u}   f3_v = {f3_v}")
     print(f" f4_u = {f4_u}   f4_v = {f4_v}")
-
-    # _fast = lambda expr: sp.cancel(sp.expand(expr))
-    # if _fast(f2_u) != 0:
-    #     denom_det = sp.simplify(2 * f1_u * f3_u - 3 * f2_u ** 2)
-    #     b1 = _fast(sp.simplify(-(f1_u * f4_u - 2 * f2_u * f3_u) / (2 * denom_det)))
-    #     b2 = _fast(sp.simplify((3 * f2_u * f4_u - 4 * f3_u ** 2) / (12 * denom_det)))
-    # elif _fast(f2_v) != 0:
-    #     denom_det = sp.simplify(2 * f1_v * f3_v - 3 * f2_v ** 2)
-    #     b1 = _fast(sp.simplify(-(f1_v * f4_v - 2 * f2_v * f3_v) / (2 * denom_det)))
-    #     b2 = _fast(sp.simplify((3 * f2_v * f4_v - 4 * f3_v ** 2) / (12 * denom_det)))
-    # else:
-    #     raise ValueError("compute_pade_time_21_pair: f2_u and f2_v both vanish identically, b1 is undetermined")
 
     denom_det_u = 2 * f1_u * f3_u - 3 * f2_u ** 2
     b1_u = -(f1_u * f4_u - 2 * f2_u * f3_u) / (2 * denom_det_u)
@@ -300,7 +265,6 @@ def compute_pade_time_22_pair(u0_expr: sp.Expr, v0_expr: sp.Expr, x_sym: sp.Symb
     print(f" b2_v = {b2_v}")
 
     # denom_det is a parameter, not a closure: it was previously captured by name, so both calls
-    # below used whichever value was assigned last (the v field) and corrupted the u numerator
     def pade_22_numer(f0: sp.Expr, f1: sp.Expr, f2: sp.Expr, f3: sp.Expr, f4: sp.Expr, denom_det: sp.Expr) -> sp.Expr:
         a0 = f0
         a1 = -(f0 * f1 * f4 - 2 * f0 * f2 * f3 - 4 * f1 ** 2 * f3 + 6 * f1 * f2 ** 2) / (2 * denom_det)

@@ -24,12 +24,12 @@ from pdes.schrodinger.physics import uv_initial_condition_mode, solve_schrodinge
 
 configure_jax(enable_x64=True)
 
-# t^(m+1)/(m+1)! gate: zero at t=0 (IC enforced); first m time derivatives of ansatz determined by Padé alone
+"""t^(m+1)/(m+1)! gate: zero at t=0 (IC enforced); first m time derivatives of ansatz determined by Padé alone"""
 def make_time_gate(t_sym: sp.Symbol, m: int = 0) -> Callable:
     expr = t_sym ** (m + 1) / sp.factorial(m + 1)
     return sp.lambdify(t_sym, expr, modules="jax")
 
-# Nonlinear Schrodinger residual for the Padé+PINN ansatz w = (R_re,R_im) + phi(t)*NN(x,t,kappa)
+"""Nonlinear Schrodinger residual for the Padé+PINN ansatz w = (R_re,R_im) + phi(t)*NN(x,t,kappa)"""
 @partial(jax.jit, static_argnums=(0, 1, 2))
 def schrodinger_residual(phi_t: Callable, R_re: Callable, R_im: Callable, params: Params, X: jnp.ndarray, kappa: jnp.ndarray) -> jnp.ndarray:
     pinn = partial(mlp_forward, params)
@@ -51,7 +51,7 @@ def schrodinger_residual(phi_t: Callable, R_re: Callable, R_im: Callable, params
         return jnp.array([res_u, res_v])
     return jax.vmap(residual_single)(X)
 
-# Padé-PINN: ansatz (u,v) = (R_re,R_im)(x,t,kappa) + phi(t)*NN(x,t,kappa), IC satisfied by construction
+"""Padé-PINN: ansatz (u,v) = (R_re,R_im)(x,t,kappa) + phi(t)*NN(x,t,kappa), IC satisfied by construction"""
 class PadePINN:
     def __init__(self, layer: list[int], lr: float, R_re: Callable, R_im: Callable, nn_t_term: Callable, order: int = 5) -> None:
         self.layer, self.lr, self.order = layer, lr, order
@@ -140,7 +140,7 @@ class PadePINN:
         print(f"Model loaded ← {filepath}")
         return model
 
-# Evaluate Padé and Padé+PINN against the reference solver for one kappa, over the full (x,t) eval grid
+"""Evaluate Padé and Padé+PINN against the reference solver for one kappa, over the full (x,t) eval grid"""
 def evaluate_kappa(model: PadePINN, R_re: Callable, R_im: Callable, kappa_test: float, x_plot: np.ndarray, t_plot: np.ndarray, XT_flat: jnp.ndarray) -> Dict[str, Any]:
     nx_eval, nt_eval = len(x_plot), len(t_plot)
     kappa_j = jnp.asarray(kappa_test)

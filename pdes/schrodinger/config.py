@@ -9,8 +9,8 @@ class SchrodingerConfig:
     # Domain
     duration: float = 2.0
     starting_point: float = 0.0
-    min_x: float = -5.0
-    max_x: float = 5.0
+    min_x: float = -7.5
+    max_x: float = 7.5
 
     # Collocation / boundary / initial-condition point counts
     nx: int = 6400
@@ -24,7 +24,7 @@ class SchrodingerConfig:
     # Network
     layers: list = field(default_factory=lambda: [3] + [64] * 6 + [2])
     lr: float = 1e-3
-    epochs: int = 20_000
+    epochs: int = 50_000
     gate_m: int = 0  # Padé+PINN time-gate order t^(m+1)/(m+1)!
 
     # kappa (dispersion coefficient), log-uniform
