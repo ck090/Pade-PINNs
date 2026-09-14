@@ -147,7 +147,7 @@ def compute_pade_time_33(u0_expr: sp.Expr, x_sym: sp.Symbol, t_sym: sp.Symbol, p
     # normalize is passed through to the Taylor recursion (see _taylor_time_coeffs); coeff_normalize is applied to the final b1..b3/a0..a3 combination instead, since that step cubes/squares the f-values (e.g. c3**3) and blindly reusing an expand-based normalize there can be far more expensive than the recursion itself -- both default to sp.simplify, matching the original unparameterised behaviour exactly
     _norm = normalize if normalize is not None else sp.simplify
     _coeff_norm = coeff_normalize if coeff_normalize is not None else sp.simplify
-    full_op = lambda u: pde_op(u)
+    full_op = lambda u: pde_op(u) + f_src
     f0, f1, f2, f3, f4, f5, f6 = _taylor_time_coeffs(u0_expr, t_sym, full_op, order=6, normalize=_norm)
     print(f" f0={f0}\n f1={f1}\n f2={f2}\n f3={f3}\n f4={f4}\n f5={f5}\n f6={f6}")
 

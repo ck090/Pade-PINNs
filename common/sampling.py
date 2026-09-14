@@ -30,3 +30,31 @@ def select_rar_points(residual_fn: Callable[[jnp.ndarray], jnp.ndarray], n_candi
     residual_mag = jnp.sum(residuals.reshape(residuals.shape[0], -1) ** 2, axis=1)
     top_idx = jnp.argsort(-residual_mag)[:n_select]
     return X_candidates[top_idx]
+
+# 2D analogue of sample_residual_and_bc: a square [min_x, max_x]^2 space domain with a boundary made
+# of 4 faces (nbc points each), rather than a 1D left/right pair. Promoted here once a second 2D PDE
+# (Poisson2D) needed it alongside heat2d.
+def sample_residual_and_bc_2d(nx: int, nbc: int, duration: float, min_x: float, max_x: float, starting_point: float) -> tuple[jnp.ndarray, jnp.ndarray]:
+    X_res = jnp.array(np.column_stack([
+        np.random.uniform(min_x, max_x, nx),
+        np.random.uniform(min_x, max_x, nx),
+        np.random.uniform(starting_point, duration, nx),
+    ]))
+    bc_xleft = jnp.array(np.column_stack([np.full(nbc, min_x), np.random.uniform(min_x, max_x, nbc), np.random.uniform(starting_point, duration, nbc)]))
+    bc_xright = jnp.array(np.column_stack([np.full(nbc, max_x), np.random.uniform(min_x, max_x, nbc), np.random.uniform(starting_point, duration, nbc)]))
+    bc_ybot = jnp.array(np.column_stack([np.random.uniform(min_x, max_x, nbc), np.full(nbc, min_x), np.random.uniform(starting_point, duration, nbc)]))
+    bc_ytop = jnp.array(np.column_stack([np.random.uniform(min_x, max_x, nbc), np.full(nbc, max_x), np.random.uniform(starting_point, duration, nbc)]))
+    X_bc = jnp.concatenate([bc_xleft, bc_xright, bc_ybot, bc_ytop], axis=0)
+    return X_res, X_bc
+
+# 2D analogue of select_rar_points, over a 3D (x, y, t) candidate domain instead of 2D (x, t).
+def select_rar_points_2d(residual_fn: Callable[[jnp.ndarray], jnp.ndarray], n_candidates: int, n_select: int, duration: float, min_x: float, max_x: float, starting_point: float) -> jnp.ndarray:
+    X_candidates = jnp.array(np.column_stack([
+        np.random.uniform(min_x, max_x, n_candidates),
+        np.random.uniform(min_x, max_x, n_candidates),
+        np.random.uniform(starting_point, duration, n_candidates),
+    ]))
+    residuals = residual_fn(X_candidates)
+    residual_mag = jnp.sum(residuals.reshape(residuals.shape[0], -1) ** 2, axis=1)
+    top_idx = jnp.argsort(-residual_mag)[:n_select]
+    return X_candidates[top_idx]
