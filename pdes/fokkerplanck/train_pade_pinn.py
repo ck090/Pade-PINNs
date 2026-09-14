@@ -19,6 +19,7 @@ from common.nn import Params, init_params, mlp_forward
 from common.sampling import sample_log_kappa, sample_residual_and_bc, select_rar_points
 from common.plotting import plot_prediction, animate_prediction, plot_error_evolution, plot_loss_history
 from common.pade_time_approx import compute_pade_time_32, make_time_gate
+from common.causal import causal_residual_loss, causal_eps_schedule
 from pdes.fokkerplanck.config import FokkerPlanckConfig, make_test_kappas
 from pdes.fokkerplanck.physics import THETA, X0_INIT, S0_INIT, fokker_planck_exact, symbolic_fokker_planck
 
@@ -39,8 +40,9 @@ def fokker_planck_residual(phi_t: Callable, R: Callable, params: Params, X: jnp.
 
 """Padé-PINN: ansatz p = R(x,t,kappa) + phi(t)*NN(x,t,kappa), IC satisfied by construction"""
 class PadePINN:
-    def __init__(self, layer: list[int], lr: float, R: Callable, nn_t_term: Callable, order: int = 5) -> None:
+    def __init__(self, layer: list[int], lr: float, R: Callable, nn_t_term: Callable, order: int = 5, n_chunks: int = 16, weight_floor: float = 0.0) -> None:
         self.layer, self.lr, self.order = layer, lr, order
+        self.n_chunks, self.weight_floor = n_chunks, weight_floor
         self.R, self.nn_t_term = R, nn_t_term
         self.params = init_params(layer, zero_last_layer=True)
         self.opt_init, self.opt_update, self.get_params = optimizers.adam(lr)
@@ -51,17 +53,19 @@ class PadePINN:
         return mlp_forward(params, X)
 
     @partial(jax.jit, static_argnums=(0,))
-    def update(self, epoch: int, opt_state: Any, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, kappa: jnp.ndarray) -> tuple[Params, Any, tuple[jnp.ndarray, jnp.ndarray]]:
+    def update(self, epoch: int, opt_state: Any, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, kappa: jnp.ndarray, causal_eps: jnp.ndarray) -> tuple[Params, Any, tuple[jnp.ndarray, jnp.ndarray]]:
         params = self.get_params(opt_state)
-        grads = jax.grad(self.loss, argnums=0)(params, X_res, X_bc_left, X_bc_right, kappa)
+        grads = jax.grad(self.loss, argnums=0)(params, X_res, X_bc_left, X_bc_right, kappa, causal_eps)
         next_opt_state = self.opt_update(epoch, grads, opt_state)
-        loss_res, loss_bc = self.loss_component(params, X_res, X_bc_left, X_bc_right, kappa)
+        loss_res, loss_bc = self.loss_component(params, X_res, X_bc_left, X_bc_right, kappa, causal_eps)
         return self.get_params(next_opt_state), next_opt_state, (loss_res, loss_bc)
 
     @partial(jax.jit, static_argnums=(0,))
-    def loss_component(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, kappa: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    def loss_component(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, kappa: jnp.ndarray, causal_eps: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         residuals = fokker_planck_residual(self.nn_t_term, self.R, params, X_res, kappa)
-        loss_residual = jnp.mean(residuals ** 2)
+        # Fokker-Planck's residual is already a single scalar per point (unlike Schrodinger's (u,v)
+        # pair), so it feeds causal_residual_loss directly against X_res's own time column
+        loss_residual = causal_residual_loss(residuals, X_res[:, 1], causal_eps, self.n_chunks, self.weight_floor)
 
         # Dirichlet BC: the density vanishes at both ends of the domain
         phi_l, phi_r = self.nn_t_term(X_bc_left[:, 1]), self.nn_t_term(X_bc_right[:, 1])
@@ -72,8 +76,8 @@ class PadePINN:
         return loss_residual, loss_bc
 
     @partial(jax.jit, static_argnums=(0,))
-    def loss(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, kappa: jnp.ndarray) -> jnp.ndarray:
-        loss_res, loss_bc = self.loss_component(params, X_res, X_bc_left, X_bc_right, kappa)
+    def loss(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, kappa: jnp.ndarray, causal_eps: jnp.ndarray) -> jnp.ndarray:
+        loss_res, loss_bc = self.loss_component(params, X_res, X_bc_left, X_bc_right, kappa, causal_eps)
         return loss_res + loss_bc
 
     def predict(self, X: jnp.ndarray, kappa: float) -> jnp.ndarray:
@@ -148,6 +152,9 @@ if __name__ == "__main__":
     RAR_EVERY, RAR_POOL, RAR_N_ANCHOR = cfg.rar_every, cfg.rar_pool, cfg.rar_n_anchor
     X_res_anchor = None
 
+    causal_eps_max, n_chunks = cfg.causal_eps_max, cfg.causal_n_chunks
+    CAUSAL_WARMUP_FRAC, CAUSAL_WEIGHT_FLOOR = cfg.causal_warmup_frac, cfg.causal_weight_floor
+
     x_sym, t_sym, kappa_sym, p_initial, pde_op = symbolic_fokker_planck()
 
     print("Computing [3/2] temporal Padé approximant for the Fokker-Planck equation...")
@@ -156,7 +163,7 @@ if __name__ == "__main__":
 
     R = sp.lambdify((x_sym, t_sym, kappa_sym), R_expr.evalf(), modules="jax", cse=True)
     nn_t_term = make_time_gate(t_sym, m=gate_m)
-    model = PadePINN(layers, lr, R, nn_t_term, order=gate_m)
+    model = PadePINN(layers, lr, R, nn_t_term, order=gate_m, n_chunks=n_chunks, weight_floor=CAUSAL_WEIGHT_FLOOR)
 
     loss_history: list[tuple[int, float, float]] = []
 
@@ -177,13 +184,14 @@ if __name__ == "__main__":
         if X_res_anchor is not None:
             X_res = jnp.concatenate([X_res, X_res_anchor], axis=0)
 
+        current_causal_eps = jnp.asarray(causal_eps_schedule(epoch, epochs, causal_eps_max, CAUSAL_WARMUP_FRAC))
         t0 = time.time()
-        model.params, model.opt_state, losses = model.update(epoch, model.opt_state, X_res, X_bc_left, X_bc_right, kappa)
+        model.params, model.opt_state, losses = model.update(epoch, model.opt_state, X_res, X_bc_left, X_bc_right, kappa, current_causal_eps)
 
         if epoch % 500 == 0:
             loss_res, loss_bc = losses
             loss_history.append((epoch, float(loss_res), float(loss_bc)))
-            print(f"  {epoch:5d}/{epochs}  [{float(loss_res):.3e}, {float(loss_bc):.3e}]  kappa={float(kappa):.5f}  {time.time() - t0:.2f}s")
+            print(f"  {epoch:5d}/{epochs}  [{float(loss_res):.3e}, {float(loss_bc):.3e}]  kappa={float(kappa):.5f}  causal_eps={float(current_causal_eps):.3f}  {time.time() - t0:.2f}s")
 
     os.makedirs("models", exist_ok=True)
     model.save_model("models/pade_pinn_fokkerplanck.pkl")
