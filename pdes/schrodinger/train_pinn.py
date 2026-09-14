@@ -17,6 +17,7 @@ from common.env import configure_jax
 from common.nn import Params, init_params, mlp_forward
 from common.sampling import sample_log_kappa, sample_residual_and_bc, select_rar_points
 from common.plotting import plot_prediction, animate_prediction, plot_loss_history, plot_pinn_error_evolution, best_pade_pinn_kappa
+from common.causal import causal_residual_loss, causal_eps_schedule
 from pdes.schrodinger.config import SchrodingerConfig, make_test_kappas
 from pdes.schrodinger.physics import uv_initial_condition_mode, solve_schrodinger_ref
 
@@ -55,27 +56,28 @@ def schrodinger_eqn(params: Params, X: jnp.ndarray, kappa: float) -> jnp.ndarray
 
 """PINN: single global network conditioned on physics parameter kappa; 2-component output (u, v)"""
 class PINN:
-    def __init__(self, layer: List[int], lr: float) -> None:
+    def __init__(self, layer: List[int], lr: float, n_chunks: int = 16, weight_floor: float = 0.0) -> None:
         self.params = init_params(layer, zero_last_layer=True)
         self.opt_init, self.opt_update, self.get_params = optimizers.adam(lr)
         self.opt_state = self.opt_init(self.params)
         self.layer = layer
         self.lr = lr
+        self.n_chunks, self.weight_floor = n_chunks, weight_floor
 
     @partial(jax.jit, static_argnums=(0,))
     def forward(self, params: Params, X: jnp.ndarray) -> jnp.ndarray:
         return mlp_forward(params, X)
 
     @partial(jax.jit, static_argnums=(0,))
-    def update(self, epoch: int, opt_state: Any, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float) -> Tuple[Any, Tuple[float, float, float]]:
+    def update(self, epoch: int, opt_state: Any, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float, causal_eps: jnp.ndarray) -> Tuple[Any, Tuple[float, float, float]]:
         params = self.get_params(opt_state)
-        grads = jax.grad(self.loss)(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa)
+        grads = jax.grad(self.loss)(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa, causal_eps)
         next_opt_state = self.opt_update(epoch, grads, opt_state)
-        loss_res, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa)
+        loss_res, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa, causal_eps)
         return next_opt_state, (loss_res, loss_bc, loss_ic)
 
     @partial(jax.jit, static_argnums=(0,))
-    def loss_component(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float) -> Tuple[float, float, float]:
+    def loss_component(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float, causal_eps: jnp.ndarray) -> Tuple[float, float, float]:
         N_res = X_res.shape[0]
         N_bc = X_bc_left.shape[0]
         N_ic = X_ic.shape[0]
@@ -85,9 +87,13 @@ class PINN:
         X_bcl_full = _append(X_bc_left, N_bc)
         X_bcr_full = _append(X_bc_right, N_bc)
         X_ic_full = _append(X_ic, N_ic)
-        # PDE residual
+        # PDE residual, causally weighted: fold (u, v) into one flat array (with a matching
+        # duplicated t) so the shared causal_residual_loss, written for a scalar residual, needs no
+        # change for this 2-component PDE
         eq = schrodinger_eqn(params, X_res_full, kappa)
-        loss_residual = jnp.mean(eq ** 2)
+        combined = jnp.concatenate([eq[:, 0], eq[:, 1]])
+        t_dup = jnp.concatenate([X_res[:, 1], X_res[:, 1]])
+        loss_residual = causal_residual_loss(combined, t_dup, causal_eps, self.n_chunks, self.weight_floor)
         # Periodic BC: u(left)=u(right), v(left)=v(right) and derivatives
         out_bcl = self.forward(params, X_bcl_full)
         out_bcr = self.forward(params, X_bcr_full)
@@ -111,8 +117,8 @@ class PINN:
         return loss_residual, loss_boundary, loss_ic
 
     @partial(jax.jit, static_argnums=(0,))
-    def loss(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float) -> float:
-        loss_residual, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa)
+    def loss(self, params: Params, X_res: jnp.ndarray, X_bc_left: jnp.ndarray, X_bc_right: jnp.ndarray, X_ic: jnp.ndarray, UV_ic: jnp.ndarray, kappa: float, causal_eps: jnp.ndarray) -> float:
+        loss_residual, loss_bc, loss_ic = self.loss_component(params, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa, causal_eps)
         return loss_residual + loss_bc + loss_ic
 
     def save_model(self, filepath: str) -> None:
@@ -158,7 +164,9 @@ if __name__ == "__main__":
     layers, lr, epochs = cfg.layers, cfg.lr, cfg.epochs
     param_lb, param_ub = cfg.param_lb, cfg.param_ub
 
-    model = PINN(layers, lr)
+    causal_eps_max, n_chunks = cfg.causal_eps_max, cfg.causal_n_chunks
+    CAUSAL_WARMUP_FRAC, CAUSAL_WEIGHT_FLOOR = cfg.causal_warmup_frac, cfg.causal_weight_floor
+    model = PINN(layers, lr, n_chunks=n_chunks, weight_floor=CAUSAL_WEIGHT_FLOOR)
 
     RAR_EVERY, RAR_POOL, RAR_N_ANCHOR = cfg.rar_every, cfg.rar_pool, cfg.rar_n_anchor
     X_res_anchor = None
@@ -182,14 +190,15 @@ if __name__ == "__main__":
         if X_res_anchor is not None:
             X_res = jnp.concatenate([X_res, X_res_anchor], axis=0)
 
+        current_causal_eps = jnp.asarray(causal_eps_schedule(epoch, epochs, causal_eps_max, CAUSAL_WARMUP_FRAC))
         start = time.time()
-        model.opt_state, losses = model.update(epoch, model.opt_state, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa_j)
+        model.opt_state, losses = model.update(epoch, model.opt_state, X_res, X_bc_left, X_bc_right, X_ic, UV_ic, kappa_j, current_causal_eps)
         model.params = model.get_params(model.opt_state)
         end = time.time()
 
         if epoch % 500 == 0:
             loss_res, loss_bc, loss_ic = losses
-            print(f"  {epoch:5d}/{epochs}  [{float(loss_res):.3e}, {float(loss_bc):.3e}, {float(loss_ic):.3e}]  kappa={kappa:.5f}  {end-start:.2f}s")
+            print(f"  {epoch:5d}/{epochs}  [{float(loss_res):.3e}, {float(loss_bc):.3e}, {float(loss_ic):.3e}]  kappa={kappa:.5f}  causal_eps={float(current_causal_eps):.3f}  {end-start:.2f}s")
 
     os.makedirs("models", exist_ok=True)
     model.save_model("models/pinn_schrodinger.pkl")

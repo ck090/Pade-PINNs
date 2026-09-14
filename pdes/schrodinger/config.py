@@ -37,6 +37,13 @@ class SchrodingerConfig:
     rar_pool: int = 10_000
     rar_n_anchor: int = 1000
 
+    # Causal training (Wang et al. 2022): weight the residual loss by elapsed-time causality so later
+    # times only get gradient signal once earlier ones have converged
+    causal_eps_max: float = 0.2
+    causal_n_chunks: int = 16
+    causal_warmup_frac: float = 0.8
+    causal_weight_floor: float = 0.4
+
 
 # 30 held-out kappas fixed before training, drawn from an RNG stream independent of the global np.random state so they never overlap with the per-epoch training draws
 def make_test_kappas(cfg: SchrodingerConfig) -> np.ndarray:
