@@ -12,3 +12,4 @@ MSE for each PDE, averaged over that PDE's held-out parameter values. Best (lowe
 | Heat2D | 2D | Linear | [3/2] | 1 | 9.048e-05 | **5.101e-05** | 3.304e-04 | u(x,y,0) = sin(πx) sin(πy) |
 | Poisson2D | 2D | Linear | [3/3] | 1 | 1.476e-03 | **8.422e-05** | 5.618e-03 | u(x,y,0) = 0, f(x,y) = sin(πx) sin(πy) |
 | Allen-Cahn2D | 2D | Nonlinear | [3/3] | 2 | 5.535e-01 | **5.638e-03** | 9.747e-01 | u(x,y,0) = sin(x) sin(πy) |
+| Fokker-Planck2D | 2D | Linear | [3/2] | 2 | 3.343e-03 | **8.738e-04** | 1.114e-03 | p(x,y,0) = 𝒩(2.0, 1.5²) ⊗ 𝒩(2.0, 1.5²) |
