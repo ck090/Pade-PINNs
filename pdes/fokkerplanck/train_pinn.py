@@ -124,7 +124,7 @@ def evaluate_kappa(model: PINN, kappa_test: float, x_plot: np.ndarray, t_plot: n
     mse = float(np.mean((U_pred - U_true) ** 2) / norm_g)
 
     # Same Fokker-Planck diagnostics the Padé+PINN reports: an unconstrained network conserves neither mass nor positivity either
-    mass = np.trapezoid(U_pred, x_plot, axis=1)
+    mass = np.trapz(U_pred, x_plot, axis=1)
 
     return {
         "U_pred": U_pred, "U_true": U_true, "errors": errors,

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sympy as sp
 from typing import Callable
 

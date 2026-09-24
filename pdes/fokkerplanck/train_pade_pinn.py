@@ -126,8 +126,8 @@ def evaluate_kappa(model: PadePINN, R: Callable, kappa_test: float, x_plot: np.n
     mse_nn = float(np.mean((U_pred - U_true) ** 2) / norm_g)
     mse_pade = float(np.mean((pade_p - U_true) ** 2) / norm_g)
 
-    mass_nn = np.trapezoid(U_pred, x_plot, axis=1)
-    mass_pade = np.trapezoid(pade_p, x_plot, axis=1)
+    mass_nn = np.trapz(U_pred, x_plot, axis=1)
+    mass_pade = np.trapz(pade_p, x_plot, axis=1)
 
     return {
         "U_pred": U_pred, "U_true": U_true,

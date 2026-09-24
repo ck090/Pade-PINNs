@@ -127,7 +127,7 @@ def evaluate_theta_kappa(model: PINN, theta_test: float, kappa_test: float, X_gr
         errors.append(np.linalg.norm(U_pred_t - U_true_t) / norm_true)
         mse_terms.append(np.mean((U_pred_t - U_true_t) ** 2))
         true_sq_terms.append(np.mean(U_true_t ** 2))
-        mass.append(np.trapezoid(np.trapezoid(U_pred_t.reshape(shape), y_ax, axis=1), x_ax, axis=0))
+        mass.append(np.trapz(np.trapz(U_pred_t.reshape(shape), y_ax, axis=1), x_ax, axis=0))
         min_p.append(float(U_pred_t.min()))
 
     norm_g = max(float(np.mean(true_sq_terms)), 1e-10)

@@ -152,8 +152,8 @@ def evaluate_theta_kappa(model: PadePINN, R: Callable, theta_test: float, kappa_
         true_sq_terms.append(np.mean(U_true_t ** 2))
 
         # Mass over the square via nested 1D trapezoids on the reshaped grid
-        mass_nn.append(np.trapezoid(np.trapezoid(U_pred_t.reshape(shape), y_ax, axis=1), x_ax, axis=0))
-        mass_pade.append(np.trapezoid(np.trapezoid(pade_p_t.reshape(shape), y_ax, axis=1), x_ax, axis=0))
+        mass_nn.append(np.trapz(np.trapz(U_pred_t.reshape(shape), y_ax, axis=1), x_ax, axis=0))
+        mass_pade.append(np.trapz(np.trapz(pade_p_t.reshape(shape), y_ax, axis=1), x_ax, axis=0))
         min_p_nn.append(float(U_pred_t.min()))
         min_p_pade.append(float(pade_p_t.min()))
 
